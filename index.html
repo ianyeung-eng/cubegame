@@ -1,132 +1,341 @@
 <!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>即時全身骨架追蹤（2025 最終修好版）</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>雙手啟動！雙球挑戰手捉遊戲（黃球任意同時觸碰版）</title>
   <style>
-    body {font-family: Arial, sans-serif; text-align: center; background:#222; color:#fff; margin:0;}
-    #container {margin:30px auto; position:relative; width:640px; height:480px; background:#000; display:inline-block; overflow:hidden;}
-    canvas {position:absolute; top:0; left:0;}
-    button {margin:20px; padding:15px 30px; font-size:20px; cursor:pointer;}
-    #info {margin:20px; font-size:18px; min-height:30px;}
-    .warning {color:#ff4444;}
+    body { margin:0; background:#000; overflow:hidden; font-family:Arial, sans-serif; }
+    #container { position: relative; width: 100vw; height: 100vh; }
+    #video, #canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+    #canvas { pointer-events: none; }
+
+    /* 鏡頭反轉按鈕 */
+    #flipBtn {
+      position: absolute;
+      top: 20px; left: 20px;
+      padding: 12px 20px;
+      background: rgba(255,255,255,0.9);
+      color: #000;
+      border: none;
+      border-radius: 50px;
+      font-size: 16px;
+      font-weight: bold;
+      z-index: 100;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    #flipBtn:hover { background: #fff; }
+
+    /* 分數 */
+    #ui {
+      position: absolute;
+      top: 20px; right: 20px;
+      color: white;
+      font-size: 36px;
+      font-weight: bold;
+      background: rgba(0,0,0,0.6);
+      padding: 12px 30px;
+      border-radius: 20px;
+      z-index: 50;
+      backdrop-filter: blur(8px);
+    }
+
+    /* 開場雙紅球提示 */
+    #readyText {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-size: 32px;
+      text-align: center;
+      background: rgba(0,0,0,0.7);
+      padding: 20px 40px;
+      border-radius: 20px;
+      z-index: 90;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
 
-  <h1>電腦／手機全身骨架即時追蹤</h1>
-  <button id="startBtn">開始追蹤</button>
-  
-  <div id="container">
-    <video id="video" width="640" height="480" autoplay playsinline muted></video>
-    <canvas id="overlay" width="640" height="480"></canvas>
-  </div>
-  
-  <div id="info">請用 localhost 或 https 開啟此檔案</div>
+<div id="container">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
 
-  <!-- 2025 仍穩定的最新版 -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+  <!-- 鏡頭反轉按鈕 -->
+  <button id="flipBtn">🔄 鏡頭反轉：關</button>
 
-  <script>
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('overlay');
-    const ctx = canvas.getContext('2d');
-    const info = document.getElementById('info');
-    const startBtn = document.getElementById('startBtn');
+  <!-- 分數（遊戲開始後才顯示） -->
+  <div id="ui" style="display:none;">分數：<span id="score">0</span></div>
 
-    // 檢查是否為安全上下文（必須）
-    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-      info.innerHTML = '<span class="warning">錯誤：請用 localhost 或 https 開啟此檔案！<br>直接雙擊檔案會被瀏覽器阻擋攝影機</span>';
-      startBtn.disabled = true;
+  <!-- 雙手啟動提示 -->
+  <div id="readyText">請用<br><b>左手碰左邊紅球</b>＋<b>右手碰右邊紅球</b><br>同時啟動遊戲！</div>
+</div>
+
+<!-- MediaPipe -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const flipBtn = document.getElementById('flipBtn');
+const ui = document.getElementById('ui');
+const scoreEl = document.getElementById('score');
+const readyText = document.getElementById('readyText');
+
+let canvasWidth = window.innerWidth;
+let canvasHeight = window.innerHeight;
+canvas.width = canvasWidth;
+canvas.height = canvasHeight;
+
+let isMirrored = false;
+let gameStarted = false;
+let score = 0;
+
+// 雙紅球（啟動用）
+let startLeftX = canvasWidth * 0.25;
+let startRightX = canvasWidth * 0.75;
+const startBalls = [
+  { x: startLeftX, y: canvasHeight / 2, radius: 90, touched: false },
+  { x: startRightX, y: canvasHeight / 2, radius: 90, touched: false }
+];
+
+// 雙黃球系統
+let targets = [];
+let isDoubleMode = false;
+
+const pose = new Pose({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`});
+pose.setOptions({
+  modelComplexity: 1,
+  smoothLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+pose.onResults(onResults);
+
+// 立即開啟鏡頭
+const camera = new Camera(video, {
+  onFrame: async () => {
+    await pose.send({image: video});
+  },
+  width: 1280,
+  height: 720
+});
+camera.start();
+
+// 鏡頭反轉按鈕
+flipBtn.addEventListener('click', () => {
+  isMirrored = !isMirrored;
+  flipBtn.textContent = `🔄 鏡頭反轉：${isMirrored ? '開' : '關'}`;
+  flipBtn.style.background = isMirrored ? '#00ff88' : 'rgba(255,255,255,0.9)';
+});
+
+function getDisplayX(rawX) {
+  return isMirrored ? canvasWidth - rawX : rawX;
+}
+
+function checkHandTouch(landmarks, ballX, ballY) {
+  const fingers = [15, 17, 19, 16, 18, 20];  // 所有手指尖
+  for (let i of fingers) {
+    const p = landmarks[i];
+    if (!p || p.visibility < 0.3) continue;
+    const px = getDisplayX(p.x * canvasWidth);
+    const py = p.y * canvasHeight;
+    if (Math.hypot(px - ballX, py - ballY) < 120) {
+      return true;
     }
+  }
+  return false;
+}
 
-    let model;
+function checkSingleTouch(landmarks) {
+  if (targets.length !== 1) return false;
+  return checkHandTouch(landmarks, targets[0].displayX, targets[0].y);
+}
 
-    async function init() {
-      startBtn.disabled = true;
-      info.textContent = '載入模型中…（約 3~8 秒）';
+function spawnTargets() {
+  targets = [];
+  if (Math.random() < 0.3) {  // 30% 雙黃球
+    isDoubleMode = true;
+    const ball1 = {
+      x: 120 + Math.random() * (canvasWidth * 0.3),  // 左側
+      y: 120 + Math.random() * (canvasHeight - 240),
+      displayX: 0,
+      radius: 75,
+      active: true,
+      touched: false
+    };
+    const ball2 = {
+      x: canvasWidth * 0.6 + Math.random() * (canvasWidth * 0.3),  // 右側
+      y: 120 + Math.random() * (canvasHeight - 240),
+      displayX: 0,
+      radius: 75,
+      active: true,
+      touched: false
+    };
+    ball1.displayX = getDisplayX(ball1.x);
+    ball2.displayX = getDisplayX(ball2.x);
+    targets.push(ball1, ball2);
+  } else {  // 單綠球
+    isDoubleMode = false;
+    const ball = {
+      x: 80 + Math.random() * (canvasWidth - 160),
+      y: 80 + Math.random() * (canvasHeight - 160),
+      displayX: 0,
+      radius: 80,
+      active: true,
+      touched: false
+    };
+    ball.displayX = getDisplayX(ball.x);
+    targets.push(ball);
+  }
+}
 
-      try {
-        // 使用 Google 官方最穩的公開 PoseNet 模型
-        const modelURL = "https://storage.googleapis.com/teachablemachine-models/posenet/mobilenet/model.json";
-        const metadataURL = "https://storage.googleapis.com/teachablemachine-models/posenet/mobilenet/metadata.json";
-        
-        model = await tmPose.load(modelURL, metadataURL);
-        info.textContent = '模型載入完成！正在請求攝影機…';
+function onResults(results) {
+  ctx.save();
+  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
 
-        // 關鍵：標準 getUserMedia + facingMode（手機前鏡頭）
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 640 },
-            height: { ideal: 480 },
-            facingMode: "user"   // 前鏡頭（手機必加）
-          },
-          audio: false
-        });
+  if (isMirrored) {
+    ctx.scale(-1, 1);
+    ctx.drawImage(results.image, -canvasWidth, 0, canvasWidth, canvasHeight);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  } else {
+    ctx.drawImage(results.image, 0, 0, canvasWidth, canvasHeight);
+  }
 
-        video.srcObject = stream;
-        video.onloadedmetadata = () => {
-          video.play();
-          info.textContent = '偵測中… 請站到鏡頭前，讓全身入鏡！';
-          loop();
-        };
+  if (results.poseLandmarks) {
+    const lm = results.poseLandmarks;
+    const displayLandmarks = isMirrored ? lm.map(p => ({...p, x: 1 - p.x})) : lm;
+    drawConnectors(ctx, displayLandmarks, POSE_CONNECTIONS, {color: '#00FFFF', lineWidth: 3});
+    drawLandmarks(ctx, displayLandmarks, {color: '#FF00FF', radius: 5});
 
-      } catch (err) {
-        console.error(err);
-        info.innerHTML = `<span class="warning">攝影機錯誤：<br>${err.message}</span>`;
-        startBtn.disabled = false;
+    if (!gameStarted) {
+      // 啟動階段（紅球）
+      const leftTouch = checkHandTouch(lm, startBalls[0].x, startBalls[0].y);  // 紅球不分左右手
+      const rightTouch = checkHandTouch(lm, startBalls[1].x, startBalls[1].y);
+      startBalls[0].touched = leftTouch;
+      startBalls[1].touched = rightTouch;
+
+      startBalls.forEach(ball => {
+        const displayBallX = getDisplayX(ball.x);
+        ctx.fillStyle = ball.touched ? '#ff00ff' : '#ff4444';
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = ball.touched ? '#ff00ff' : '#ff0000';
+        ctx.beginPath();
+        ctx.arc(displayBallX, ball.y, ball.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 8;
+        ctx.stroke();
+      });
+
+      if (leftTouch && rightTouch) {
+        gameStarted = true;
+        readyText.style.display = 'none';
+        ui.style.display = 'block';
+        score = 0;
+        scoreEl.textContent = '0';
+        spawnTargets();
       }
-    }
+    } else {
+      // 遊戲階段
+      let scored = false;
 
-    async function loop() {
-      await predict();
-      requestAnimationFrame(loop);
-    }
+      if (isDoubleMode) {
+        // 🔥 黃球：任意手同時觸碰兩個球
+        const touch1 = checkHandTouch(lm, targets[0].displayX, targets[0].y);
+        const touch2 = checkHandTouch(lm, targets[1].displayX, targets[1].y);
+        targets[0].touched = touch1;
+        targets[1].touched = touch2;
 
-    async function predict() {
-      if (!model) return;
-
-      try {
-        const { pose } = await model.estimatePose(video);
-
-        // 畫攝影機畫面（鏡像翻轉）
-        ctx.save();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.scale(-1, 1);
-        ctx.translate(-canvas.width, 0);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-
-        // 畫骨架（也要跟著翻轉）
-        if (pose && pose.score > 0.3) {
-          ctx.save();
-          ctx.scale(-1, 1);
-          ctx.translate(-canvas.width, 0);
-          
-          tmPose.drawKeypoints(pose.keypoints, 0.6, ctx);
-          tmPose.drawSkeleton(pose.keypoints, 0.6, ctx);
-          
-          ctx.restore();
-
-          info.textContent = `偵測成功！信心度：${pose.score.toFixed(2)}`;
-        } else {
-          info.textContent = '搜尋人體中…（請站直、全身入鏡、光線充足）';
+        if (touch1 && touch2) {
+          score += 2;
+          scored = true;
         }
-      } catch (e) {
-        console.error(e);
+      } else if (checkSingleTouch(lm)) {
+        targets[0].touched = true;
+        score += 1;
+        scored = true;
       }
+
+      if (scored) {
+        scoreEl.textContent = score;
+        spawnTargets();
+
+        scoreEl.style.transform = 'scale(2) rotate(360deg)';
+        scoreEl.style.color = isDoubleMode ? '#ffd700' : '#00ff88';
+        const addScore = isDoubleMode ? 2 : 1;
+        scoreEl.innerHTML = `+${addScore}!`;
+        setTimeout(() => {
+          scoreEl.innerHTML = score;
+          scoreEl.style.transform = 'scale(1) rotate(0deg)';
+          scoreEl.style.color = 'white';
+        }, 500);
+      }
+
+      // 畫目標球
+      targets.forEach((ball, index) => {
+        if (!ball.active) return;
+
+        const isYellow = isDoubleMode;
+        const mainColor = isYellow ? (ball.touched ? '#ffff99' : '#ffff00') : '#00ff00';
+        const glowColor = isYellow ? (ball.touched ? '#ffff00' : '#ffd700') : '#00ff00';
+        const borderColor = isYellow ? '#ffaa00' : '#00ff88';
+
+        ctx.fillStyle = mainColor;
+        ctx.shadowBlur = 60;
+        ctx.shadowColor = glowColor;
+        ctx.beginPath();
+        ctx.arc(ball.displayX, ball.y, ball.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.lineWidth = 18;
+        ctx.strokeStyle = borderColor;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        const pulse = Math.sin(Date.now() * 0.015 + index) * 8 + ball.radius;
+        ctx.beginPath();
+        ctx.arc(ball.displayX, ball.y, pulse, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        if (isYellow) {
+          ctx.fillStyle = '#ff0000';
+          ctx.font = 'bold 24px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('雙', ball.displayX, ball.y);  // 只標記 '雙' 不分左右
+        }
+      });
     }
+  }
+  ctx.restore();
+}
 
-    startBtn.addEventListener('click', init);
-  </script>
+// 視窗調整
+window.addEventListener('resize', () => {
+  canvasWidth = window.innerWidth;
+  canvasHeight = window.innerHeight;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
 
-  <div style="margin:30px; font-size:14px; color:#aaa;">
-    使用方法：<br>
-    1. 用 VS Code Live Server、Python http.server、或任何本機 server 開啟<br>
-    2. 按「開始追蹤」→ 允許攝影機 → 站到鏡頭前<br>
-    3. 綠色線條 + 紅點 = 全身骨架
-  </div>
+  startLeftX = canvasWidth * 0.25;
+  startRightX = canvasWidth * 0.75;
+  startBalls[0].x = startLeftX;
+  startBalls[1].x = startRightX;
+  startBalls[0].y = canvasHeight / 2;
+  startBalls[1].y = canvasHeight / 2;
+
+  if (gameStarted) spawnTargets();
+});
+</script>
+
 </body>
 </html>
